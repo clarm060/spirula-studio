@@ -165,10 +165,20 @@ jobs:
           $asset = "spirula-$version-windows-vulkan-x86_64.zip"
           Compress-Archive -Path build_vulkan\spirula.exe -DestinationPath $asset
           "ASSET=$asset" >> $env:GITHUB_ENV
+          $setup = "spirula-$version-windows-setup.exe"
+          & tools\windows_installer\build.bat $setup
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "SETUP=$setup" >> $env:GITHUB_ENV
 
       - uses: actions/upload-artifact@v7
         with:
           path: ${{ env.ASSET }}
+          archive: false
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.SETUP }}
           archive: false
           retention-days: 14
 
