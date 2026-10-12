@@ -17,6 +17,16 @@ Skip this version / Remind me later. The check times out after 4 s, so
 offline launches are not held up. Settings and caches in `%APPDATA%` and
 `%LOCALAPPDATA%\spirula-studio` are left alone by updates and uninstall.
 
+## Your own build (CUDA)
+
+Releases only carry the Vulkan build. To run a build you compiled, for
+example `build_develop.bat -DSS_BACKEND=cuda`, pick "My own build" in the
+wizard and point it at `build_cuda\spirula.exe`. Its folder's DLLs (cudart)
+are copied with it. From then on the launcher never downloads over it: a new
+release only shows a notice (with "Switch to official build"), and when the
+exe at that path changes after a rebuild, the next launch copies it in. Run
+Setup again and pick "Official release" to go back.
+
 ## Build
 
 ```bat
@@ -35,6 +45,7 @@ needed. The source stays C# 5 for that compiler.
 | `SpirulaLauncher.exe --update` | check now, report "up to date" too |
 | `SpirulaLauncher.exe --uninstall` | uninstall (what Settings > Apps runs) |
 | `... --install/--update/--uninstall --quiet` | same with no UI; errors go to `%TEMP%\SpirulaSetup.log` and exit code 1 |
+| `SpirulaSetup.exe --install --quiet --from <spirula.exe>` | silent install of your own build |
 
 The exe is unsigned, so SmartScreen warns the first time it is run from a
 download ("More info" > "Run anyway").

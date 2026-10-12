@@ -90,6 +90,11 @@ class Settings {
     public string InstalledTag { get { return Get("installed", ""); } set { Set("installed", value); } }
     public string SkippedTag { get { return Get("skip", ""); } set { Set("skip", value); } }
     public bool AutoCheck { get { return Get("auto_check", "1") == "1"; } set { Set("auto_check", value ? "1" : "0"); } }
+    // A user-built spirula.exe (e.g. the CUDA backend, which has no release
+    // asset). Updates then never download over it; a rebuild at this path is
+    // copied in on the next launch instead.
+    public string CustomExe { get { return Get("custom", ""); } set { Set("custom", value); } }
+    public string CustomStamp { get { return Get("custom_stamp", ""); } set { Set("custom_stamp", value); } }
     public DateTime LastCheck {
         get {
             long t;
@@ -198,22 +203,13 @@ static class Installer {
             string root = Path.GetDirectoryName(found[0]);
 
             report("Installing...", 96);
-            foreach (var f in Directory.GetFiles(root, "*", SearchOption.AllDirectories)) {
-                string dest = Path.Combine(Paths.InstallDir, f.Substring(root.Length + 1));
-                Directory.CreateDirectory(Path.GetDirectoryName(dest));
-                if (File.Exists(dest)) {
-                    try {
-                        File.Delete(dest);
-                    } catch (Exception) {
-                        string aside = dest + "." + DateTime.Now.Ticks + ".old";
-                        File.Move(dest, aside);
-                    }
-                }
-                File.Move(f, dest);
-            }
+            foreach (var f in Directory.GetFiles(root, "*", SearchOption.AllDirectories))
+                Place(f, Path.Combine(Paths.InstallDir, f.Substring(root.Length + 1)), true);
             var s = Settings.Load();
             s.InstalledTag = rel.Tag;
             s.SkippedTag = "";
+            s.CustomExe = "";
+            s.CustomStamp = "";
             s.Save();
             WriteUninstallEntry(rel.Tag);
             report("Installed " + rel.Tag + ".", 100);
@@ -222,11 +218,74 @@ static class Installer {
         }
     }
 
-    public static void FullInstall(bool desktop, bool openWith, bool autoCheck, Action<string, int> report) {
-        report("Looking up the latest release...", 0);
-        Release rel = GitHub.Latest(15000);
+    static void Place(string src, string dest, bool move) {
+        Directory.CreateDirectory(Path.GetDirectoryName(dest));
+        if (File.Exists(dest)) {
+            try {
+                File.Delete(dest);
+            } catch (Exception) {
+                File.Move(dest, dest + "." + DateTime.Now.Ticks + ".old");
+            }
+        }
+        if (move) File.Move(src, dest);
+        else File.Copy(src, dest);
+    }
+
+    // DLLs beside the exe come along: a CUDA build links cudart dynamically.
+    public static void InstallCustom(string exe, Action<string, int> report) {
+        exe = Path.GetFullPath(exe);
+        if (!File.Exists(exe)) throw new Exception(exe + " does not exist.");
+        report("Copying " + exe + "...", 10);
+        Directory.CreateDirectory(Paths.InstallDir);
+        Place(exe, Paths.App, false);
+        foreach (var dll in Directory.GetFiles(Path.GetDirectoryName(exe), "*.dll"))
+            Place(dll, Path.Combine(Paths.InstallDir, Path.GetFileName(dll)), false);
+        string tag = ReadVersion(Paths.App);
+        var s = Settings.Load();
+        s.InstalledTag = tag;
+        s.SkippedTag = "";
+        s.CustomExe = exe;
+        s.CustomStamp = Stamp(exe);
+        s.Save();
+        WriteUninstallEntry(tag + " (custom build)");
+        report("Installed your build " + tag + ".", 100);
+    }
+
+    static string Stamp(string path) {
+        var fi = new FileInfo(path);
+        return fi.LastWriteTimeUtc.Ticks + ":" + fi.Length;
+    }
+
+    // `spirula --version` prints "2026.10.6 (b9c8042)".
+    public static string ReadVersion(string exe) {
+        try {
+            var p = Process.Start(new ProcessStartInfo(exe, "--version") {
+                UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true
+            });
+            string outp = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(10000);
+            string v = outp.Trim().Split(' ')[0];
+            if (v.Length > 0 && char.IsDigit(v[0])) return "v" + v;
+        } catch (Exception) { }
+        return "unknown";
+    }
+
+    public static void RefreshCustom() {
+        var s = Settings.Load();
+        if (s.CustomExe == "" || !File.Exists(s.CustomExe) || Stamp(s.CustomExe) == s.CustomStamp || AppRunning()) return;
+        try {
+            InstallCustom(s.CustomExe, (m, p) => { });
+        } catch (Exception) { }
+    }
+
+    public static void FullInstall(string customExe, bool desktop, bool openWith, bool autoCheck, Action<string, int> report) {
         CopyLauncher();
-        InstallRelease(rel, report);
+        if (customExe != null) {
+            InstallCustom(customExe, report);
+        } else {
+            report("Looking up the latest release...", 0);
+            InstallRelease(GitHub.Latest(15000), report);
+        }
         CreateShortcuts(desktop);
         if (openWith) RegisterShell();
         var s = Settings.Load();
@@ -416,7 +475,10 @@ class ProgressForm : Form {
 }
 
 class SetupForm : Form {
-    readonly CheckBox _desktop = new CheckBox { Text = "Create a desktop shortcut", Checked = true, AutoSize = true };
+    readonly RadioButton _official = new RadioButton { Text = "Official release (Vulkan, recommended)", AutoSize = true };
+    readonly RadioButton _custom = new RadioButton { Text = "My own build", AutoSize = true, Margin = new Padding(3, 8, 3, 0) };
+    readonly TextBox _customPath = new TextBox { Width = 340 };
+    readonly CheckBox _desktop = new CheckBox { Text = "Create a desktop shortcut", Checked = true, AutoSize = true, Margin = new Padding(3, 10, 3, 3) };
     readonly CheckBox _openWith = new CheckBox { Text = "Add to \"Open with\" and the folder right-click menu", Checked = true, AutoSize = true };
     readonly CheckBox _autoCheck = new CheckBox { Text = "Check for new versions when Spirula Studio starts", Checked = true, AutoSize = true };
     readonly CheckBox _launch = new CheckBox { Text = "Launch Spirula Studio when done", Checked = true, AutoSize = true };
@@ -438,7 +500,7 @@ class SetupForm : Form {
         };
         var header = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Margin = new Padding(0, 0, 0, 10) };
         header.Controls.Add(new PictureBox {
-            Image = new Icon(Program.AppIcon, 48, 48).ToBitmap(), Size = new Size(48, 48), SizeMode = PictureBoxSizeMode.Zoom
+            Image = Program.LogoImage(), Size = new Size(48, 48), SizeMode = PictureBoxSizeMode.Zoom
         });
         header.Controls.Add(new Label {
             Text = Paths.AppName, Font = new Font(Font.FontFamily, 16f, FontStyle.Bold), AutoSize = true,
@@ -446,11 +508,38 @@ class SetupForm : Form {
         });
         layout.Controls.Add(header);
         layout.Controls.Add(new Label {
-            AutoSize = true, MaximumSize = new Size(460, 0), Margin = new Padding(0, 0, 0, 10),
-            Text = (existing ? "Spirula Studio is already installed. Continuing reinstalls the latest release.\n\n" : "") +
-                   "Downloads the latest Windows release from github.com/" + Paths.UpdateRepo +
-                   " and installs it for your user account (no administrator rights needed) to:\n" + Paths.InstallDir
+            AutoSize = true, MaximumSize = new Size(480, 0), Margin = new Padding(0, 0, 0, 10),
+            Text = (existing ? "Spirula Studio is already installed. Continuing replaces the installed build.\n\n" : "") +
+                   "Installs for your user account (no administrator rights needed) to:\n" + Paths.InstallDir
         });
+
+        var build = new GroupBox { Text = "Which build", AutoSize = true, Width = 480, Padding = new Padding(10, 6, 10, 8) };
+        var buildRows = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
+        buildRows.Controls.Add(_official);
+        buildRows.Controls.Add(Note("Downloaded from github.com/" + Paths.UpdateRepo + ". Runs on NVIDIA, AMD and Intel GPUs. Updates install automatically."));
+        buildRows.Controls.Add(_custom);
+        buildRows.Controls.Add(Note("Point at a spirula.exe you compiled, such as a CUDA build (build_develop.bat -DSS_BACKEND=cuda). " +
+                                    "Updates never overwrite it. Rebuild at the same path and the next launch picks it up."));
+        var pathRow = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, WrapContents = false, Margin = new Padding(18, 2, 0, 0) };
+        var browse = new Button { Text = "Browse...", AutoSize = true };
+        browse.Click += delegate {
+            using (var dlg = new OpenFileDialog { Filter = "spirula.exe|spirula.exe|Programs (*.exe)|*.exe", Title = "Choose your spirula.exe" }) {
+                if (_customPath.Text != "") try { dlg.InitialDirectory = Path.GetDirectoryName(_customPath.Text); } catch (Exception) { }
+                if (dlg.ShowDialog(this) == DialogResult.OK) { _customPath.Text = dlg.FileName; _custom.Checked = true; }
+            }
+        };
+        pathRow.Controls.Add(_customPath);
+        pathRow.Controls.Add(browse);
+        buildRows.Controls.Add(pathRow);
+        build.Controls.Add(buildRows);
+        layout.Controls.Add(build);
+        _customPath.TextChanged += delegate { if (_customPath.Text != "") _custom.Checked = true; };
+        _custom.CheckedChanged += delegate { _autoCheck.Text = _custom.Checked ? "Tell me when a new release is out" : "Check for new versions when Spirula Studio starts"; };
+
+        var prev = Settings.Load();
+        if (prev.CustomExe != "") { _customPath.Text = prev.CustomExe; _custom.Checked = true; }
+        else _official.Checked = true;
+
         layout.Controls.Add(_desktop);
         layout.Controls.Add(_openWith);
         layout.Controls.Add(_autoCheck);
@@ -468,14 +557,31 @@ class SetupForm : Form {
         CancelButton = cancel;
     }
 
+    static Label Note(string text) {
+        return new Label { Text = text, AutoSize = true, MaximumSize = new Size(440, 0), ForeColor = SystemColors.GrayText, Margin = new Padding(18, 0, 3, 2) };
+    }
+
     void DoInstall() {
         if (Installer.AppRunning()) {
             MessageBox.Show(this, "Close Spirula Studio before installing.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
+        string customExe = null;
+        if (_custom.Checked) {
+            customExe = _customPath.Text.Trim().Trim('"');
+            if (!File.Exists(customExe) || !customExe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) {
+                MessageBox.Show(this, "Choose the spirula.exe you built.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (string.Equals(Path.GetFullPath(customExe), Path.GetFullPath(Paths.App), StringComparison.OrdinalIgnoreCase)) {
+                MessageBox.Show(this, "That is the installed copy. Choose the one in your build folder, e.g. build_cuda\\spirula.exe.", Text,
+                                MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+        }
         bool desktop = _desktop.Checked, openWith = _openWith.Checked, autoCheck = _autoCheck.Checked;
         var p = new ProgressForm("Installing " + Paths.AppName,
-                                 report => Installer.FullInstall(desktop, openWith, autoCheck, report));
+                                 report => Installer.FullInstall(customExe, desktop, openWith, autoCheck, report));
         Hide();
         p.ShowDialog();
         if (p.Error != null) {
@@ -494,7 +600,7 @@ class UpdateForm : Form {
     public enum Choice { Later, Update, Skip }
     public Choice Result = Choice.Later;
 
-    public UpdateForm(string current, Release rel) {
+    public UpdateForm(string current, Release rel, bool custom) {
         Text = Paths.AppName + " Update";
         Icon = Program.AppIcon;
         StartPosition = FormStartPosition.CenterScreen;
@@ -504,9 +610,10 @@ class UpdateForm : Form {
         Padding = new Padding(12);
 
         var head = new Label {
-            Dock = DockStyle.Top, Height = 44, Font = new Font(Font.FontFamily, 10.5f, FontStyle.Bold),
+            Dock = DockStyle.Top, Height = custom ? 64 : 44, Font = new Font(Font.FontFamily, 10.5f, FontStyle.Bold),
             Text = "Spirula Studio " + rel.Tag + " is available." +
-                   (string.IsNullOrEmpty(current) ? "" : "  You have " + current + ".")
+                   (string.IsNullOrEmpty(current) ? "" : "  You have " + current + (custom ? " (your own build)" : "") + ".") +
+                   (custom ? "\nPull and rebuild to update your build, or switch to the official Vulkan release." : "")
         };
         var notes = new TextBox {
             Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
@@ -515,7 +622,7 @@ class UpdateForm : Form {
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Padding = new Padding(0, 10, 0, 0) };
         var later = new Button { Text = "Remind me later", AutoSize = true };
         var skip = new Button { Text = "Skip this version", AutoSize = true };
-        var update = new Button { Text = "Update now", AutoSize = true };
+        var update = new Button { Text = custom ? "Switch to official build" : "Update now", AutoSize = true };
         later.Click += delegate { Result = Choice.Later; Close(); };
         skip.Click += delegate { Result = Choice.Skip; Close(); };
         update.Click += delegate { Result = Choice.Update; Close(); };
@@ -535,6 +642,12 @@ static class Program {
     static readonly TimeSpan CheckInterval = TimeSpan.FromHours(6);
     public static Icon AppIcon;
 
+    // Icon.ToBitmap garbles the .ico's PNG-compressed 256px frame.
+    public static Image LogoImage() {
+        using (var st = typeof(Program).Assembly.GetManifestResourceStream("logo.png"))
+            return new Bitmap(Image.FromStream(st));
+    }
+
     [STAThread]
     static int Main(string[] args) {
         Application.EnableVisualStyles();
@@ -542,7 +655,7 @@ static class Program {
         using (var st = typeof(Program).Assembly.GetManifestResourceStream("app.ico")) AppIcon = new Icon(st);
 
         string mode = args.Length > 0 && args[0].StartsWith("--") ? args[0] : "";
-        if (mode != "" && Array.IndexOf(args, "--quiet") > 0) return Quiet(mode);
+        if (mode != "" && Array.IndexOf(args, "--quiet") > 0) return Quiet(mode, args);
         if (mode == "--uninstall") return Uninstall();
         if (mode == "--install" || !Paths.RunningInstalled) {
             var f = new SetupForm();
@@ -556,16 +669,22 @@ static class Program {
         return Launch(args);
     }
 
-    // --install/--update/--uninstall --quiet: no UI, for scripts and package
-    // managers. Failures go to %TEMP%\SpirulaSetup.log and the exit code.
-    static int Quiet(string mode) {
+    // --install/--update/--uninstall --quiet [--from <spirula.exe>]: no UI,
+    // for scripts. Failures go to %TEMP%\SpirulaSetup.log and the exit code.
+    static int Quiet(string mode, string[] args) {
+        int from = Array.IndexOf(args, "--from");
+        string customExe = from > 0 && from + 1 < args.Length ? args[from + 1] : null;
         Action<string, int> none = (m, p) => { };
         try {
             if (mode == "--install") {
                 if (Installer.AppRunning()) throw new Exception("Spirula Studio is running.");
-                Installer.FullInstall(true, true, true, none);
+                Installer.FullInstall(customExe, true, true, true, none);
             } else if (mode == "--update") {
                 var s = Settings.Load();
+                if (s.CustomExe != "") {
+                    Installer.RefreshCustom();
+                    return 0;
+                }
                 Release rel = GitHub.Latest(15000);
                 s.LastCheck = DateTime.UtcNow;
                 s.Save();
@@ -595,6 +714,7 @@ static class Program {
             Application.Run(f);
             return f.Installed ? 0 : 1;
         }
+        Installer.RefreshCustom();
         var s = Settings.Load();
         if (s.AutoCheck && DateTime.UtcNow - s.LastCheck > CheckInterval && !Installer.AppRunning())
             CheckForUpdate(false);
@@ -605,7 +725,9 @@ static class Program {
     // interactive: the user asked, so report "up to date" and errors, and
     // ignore a skipped version. Otherwise stay silent unless there is news.
     static void CheckForUpdate(bool interactive) {
+        if (interactive) Installer.RefreshCustom();
         var s = Settings.Load();
+        bool custom = s.CustomExe != "";
         Release rel;
         try {
             rel = GitHub.Latest(interactive ? 15000 : 4000);
@@ -620,12 +742,12 @@ static class Program {
         bool newer = string.IsNullOrEmpty(s.InstalledTag) || GitHub.Compare(rel.Tag, s.InstalledTag) > 0;
         if (!newer || (!interactive && rel.Tag == s.SkippedTag)) {
             if (interactive)
-                MessageBox.Show("Spirula Studio " + s.InstalledTag + " is the latest version.", Paths.AppName,
+                MessageBox.Show("Spirula Studio " + s.InstalledTag + (custom ? " (your own build)" : "") + " is up to date with the latest release.", Paths.AppName,
                                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
-        var f = new UpdateForm(s.InstalledTag, rel);
+        var f = new UpdateForm(s.InstalledTag, rel, custom);
         f.ShowDialog();
         if (f.Result == UpdateForm.Choice.Skip) {
             s.SkippedTag = rel.Tag;
@@ -633,6 +755,10 @@ static class Program {
             return;
         }
         if (f.Result != UpdateForm.Choice.Update) return;
+        if (custom && MessageBox.Show("Replace your own build with the official Vulkan release " + rel.Tag +
+                                      "?\n\nYour build folder is not touched. Run Setup again to switch back.",
+                                      Paths.AppName, MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
+            return;
         if (Installer.AppRunning()) {
             MessageBox.Show("Close Spirula Studio, then choose Check for Updates from the Start menu.", Paths.AppName,
                             MessageBoxButtons.OK, MessageBoxIcon.Information);

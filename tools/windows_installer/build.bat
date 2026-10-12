@@ -16,6 +16,7 @@ if "%OUT%"=="" set OUT=%HERE%SpirulaSetup.exe
     /win32icon:"%HERE%..\..\assets\icon.ico" ^
     /win32manifest:"%HERE%app.manifest" ^
     /resource:"%HERE%..\..\assets\icon.ico",app.ico ^
+    /resource:"%HERE%..\..\assets\icon_128.png",logo.png ^
     /r:System.dll /r:System.Core.dll /r:Microsoft.CSharp.dll /r:System.Drawing.dll ^
     /r:System.Windows.Forms.dll /r:System.IO.Compression.dll ^
     /r:System.IO.Compression.FileSystem.dll /r:System.Web.Extensions.dll ^
